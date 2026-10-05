@@ -11,7 +11,7 @@ type Header struct {
 	FileSize uint64
 }
 
-type Error int
+type Error = byte
 
 const magickConst uint32 = 0x4C4F4144 // 'LOAD' in hex
 
@@ -19,6 +19,8 @@ const magickConst uint32 = 0x4C4F4144 // 'LOAD' in hex
 // Мы, конечно, можем попробовать создать файл с таким названием...
 // Вдруг получится? Иначе вернём клиенту ошибку.
 const maxFileName = 4096
+
+const ChunkSize = 1024
 
 const (
 	ErrDone               = 0
@@ -29,6 +31,7 @@ const (
 	ErrBadMagick          = 5
 )
 
+// Check [WriteHeader] to explore header structure
 func ReadHeader(r io.Reader) (hdr *Header, protoErr Error, errDesc string) {
 	var (
 		err error
@@ -61,7 +64,6 @@ func ReadHeader(r io.Reader) (hdr *Header, protoErr Error, errDesc string) {
 	if err = binary.Read(r, binary.BigEndian, &fileSize); err != nil {
 		goto failed
 	}
-
 	return &Header{
 			FileName: string(fileNameBuf),
 			FileSize: fileSize},
@@ -87,8 +89,18 @@ func WriteHeader(w io.Writer, h Header) error {
 	return binary.Write(w, binary.BigEndian, h.FileSize)
 }
 
-func ReadChunk(r io.Reader, buf []byte) int
+func ReadChunk(r io.Reader, buf []byte) (int, error) {
+	return io.ReadFull(r, buf)
+}
 
-func WriteChunk(w io.Writer, buf []byte)
+func WriteChunk(w io.Writer, buf []byte) error {
+	_, err := w.Write(buf)
+	return err
+}
 
-func SendError(w io.Writer, e Error)
+func SendError(w io.Writer, e Error) error {
+	var buf [1]byte
+	buf[0] = e
+	_, err := w.Write(buf[:])
+	return err
+}
