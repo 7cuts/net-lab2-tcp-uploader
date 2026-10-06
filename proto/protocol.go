@@ -8,7 +8,7 @@ import (
 
 type Header struct {
 	FileName string
-	FileSize uint64
+	FileSize int64
 }
 
 type Error = byte
@@ -29,7 +29,32 @@ const (
 	ErrNotEnoughSpace     = 3
 	ErrUnknown            = 4
 	ErrBadMagick          = 5
+	ErrExists             = 6
+	ErrCorruptedFile      = 7
 )
+
+func Err2Str(e Error) string {
+	switch e {
+	case ErrDone:
+		return "ErrDone"
+	case ErrNameTooLong:
+		return "ErrNameTooLong"
+	case ErrUnacceptedFileName:
+		return "ErrUnacceptedFileName"
+	case ErrNotEnoughSpace:
+		return "ErrNotEnoughSpace"
+	case ErrUnknown:
+		return "ErrUnknown"
+	case ErrBadMagick:
+		return "ErrBadMagick"
+	case ErrExists:
+		return "ErrExists"
+	case ErrCorruptedFile:
+		return "ErrCorruptedFile"
+	default:
+		return "ErrUnknown"
+	}
+}
 
 // Check [WriteHeader] to explore header structure
 func ReadHeader(r io.Reader) (hdr *Header, protoErr Error, errDesc string) {
@@ -39,7 +64,7 @@ func ReadHeader(r io.Reader) (hdr *Header, protoErr Error, errDesc string) {
 		magick         uint32
 		fileNameLength uint64
 		fileNameBuf    []byte
-		fileSize       uint64
+		fileSize       int64
 	)
 
 	if err = binary.Read(r, binary.BigEndian, &magick); err != nil {
@@ -54,7 +79,11 @@ func ReadHeader(r io.Reader) (hdr *Header, protoErr Error, errDesc string) {
 		goto failed
 	}
 	if fileNameLength > maxFileName {
-		return nil, ErrNameTooLong, fmt.Sprintf("fileNameLength is %d bytes. maximum is %d bytes", fileNameLength, maxFileName)
+		return nil,
+			ErrNameTooLong,
+			fmt.Sprintf("fileNameLength is %d bytes. maximum is %d bytes",
+				fileNameLength,
+				maxFileName)
 	}
 
 	fileNameBuf = make([]byte, fileNameLength)
@@ -89,11 +118,12 @@ func WriteHeader(w io.Writer, h Header) error {
 	return binary.Write(w, binary.BigEndian, h.FileSize)
 }
 
-func ReadChunk(r io.Reader, buf []byte) (int, error) {
-	return io.ReadFull(r, buf)
+// see [io.Reader.Read]
+func Read(r io.Reader, buf []byte) (int, error) {
+	return r.Read(buf)
 }
 
-func WriteChunk(w io.Writer, buf []byte) error {
+func Write(w io.Writer, buf []byte) error {
 	_, err := w.Write(buf)
 	return err
 }
@@ -103,4 +133,13 @@ func SendError(w io.Writer, e Error) error {
 	buf[0] = e
 	_, err := w.Write(buf[:])
 	return err
+}
+
+func RecvError(r io.Reader) Error {
+	buf := make([]byte, 1)
+	_, err := r.Read(buf)
+	if err != nil {
+		return ErrUnknown
+	}
+	return buf[0]
 }
