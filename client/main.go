@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"uploader/proto"
 )
 
@@ -18,16 +20,17 @@ func main() {
 
 	conn_str := os.Args[1]
 	fileName := filepath.Base(os.Args[2])
+	filePath := os.Args[2]
 	// use this to check server file names security checks
 	// fileName := os.Args[2]
 
-	info, err := os.Stat(fileName)
+	info, err := os.Stat(filePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Cannot stat file \"%s\": %s\n", fileName, err)
+		fmt.Fprintf(os.Stderr, "Cannot stat file \"%s\": %s\n", filePath, err)
 		os.Exit(1)
 	}
 
-	f, err := os.Open(fileName)
+	f, err := os.Open(filePath)
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Cannot open file: %s\n", err)
@@ -64,16 +67,21 @@ func main() {
 		err = proto.Write(conn, buf[:n])
 
 		if err != nil {
+			if errors.Is(err, syscall.ECONNRESET) {
+				// it's ok
+				break
+			}
+			// something bad has happend
 			fmt.Fprintf(os.Stderr, "Error while uploading file: %s\n", err)
 			os.Exit(1)
 		}
 	}
 
 	// wait message from server
-	fmt.Println("Waiting accept from server")
+	fmt.Println("Waiting server response...")
 	protoErr := proto.RecvError(conn)
 	if protoErr != proto.ErrDone {
-		fmt.Fprintf(os.Stderr, "Got error from server: %s\n",
+		fmt.Fprintf(os.Stderr, "[ERROR] %s\n",
 			proto.Err2Str(protoErr))
 		os.Exit(1)
 	}
