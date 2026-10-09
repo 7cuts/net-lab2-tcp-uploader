@@ -21,9 +21,11 @@ package main
 import (
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"uploader/proto"
@@ -87,11 +89,27 @@ type clientUpdate struct {
 // }
 
 func main() {
-
-	port := "4444"
-	listener, err := net.Listen("tcp4", "0:4444")
+	f, err := os.OpenFile("server.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Cannot listen on port %s: %s\n", port, err)
+		log.Printf("Cannot create log file: %s\n", err)
+	}
+	defer f.Close()
+	log.SetOutput(f)
+
+	if len(os.Args) != 2 {
+		fmt.Fprintf(os.Stderr, "Usage:\n\t%s <listening port>\n", os.Args[0])
+		os.Exit(1)
+	}
+
+	port, err := strconv.Atoi(os.Args[1])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Bad port number")
+		os.Exit(1)
+	}
+
+	listener, err := net.Listen("tcp4", fmt.Sprintf("0:%d", port))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Cannot listen on port %d: %s\n", port, err)
 		os.Exit(1)
 	}
 
@@ -102,27 +120,27 @@ func main() {
 	for {
 		client, err := listener.Accept()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "Error while accepting client ", err)
+			log.Printf("Error while accepting client %s\n", err)
 		}
 
-		go handleConn(client)
+		go handleConn(client, updates)
 	}
 
 }
 
-func handleConn(conn net.Conn) {
+func handleConn(conn net.Conn, updates chan<- clientUpdate) {
 	defer conn.Close()
 
 	hdr, protoErr, errDesc := proto.ReadHeader(conn)
 
 	if protoErr != proto.ErrDone {
-		fmt.Fprintf(os.Stderr, "Got error while reading header: %s (%s)\n",
+		log.Printf("Got error while reading header: %s (%s)\n",
 			proto.Err2Str(protoErr), errDesc)
 		return
 	}
 
 	if !isSafeFileName(hdr.FileName) {
-		fmt.Fprintln(os.Stderr, "Client sent not safe file name")
+		log.Printf("Client [%s] sent not safe file name: \"%s\"\n", conn.RemoteAddr(), hdr.FileName)
 		proto.SendError(conn, proto.ErrUnacceptedFileName)
 		return
 	}
@@ -130,23 +148,27 @@ func handleConn(conn net.Conn) {
 	// check if file exists
 	_, err := os.Stat(hdr.FileName)
 	if err == nil {
-		fmt.Fprintln(os.Stderr, err)
+		log.Printf("Client [%s] tried to upload existing file: \"%s\"\n", conn.RemoteAddr(), hdr.FileName)
 		proto.SendError(conn, proto.ErrExists)
 		return
 	}
 
+	// err != nil
 	if !os.IsNotExist(err) {
 		proto.SendError(conn, proto.ErrUnknown)
 		// We are in our "uploads" dir. It is not ok if there are
 		// some files that we cannot stat. It shouldn't be like  that
-		panic(fmt.Sprintf(
+		fmt.Fprintf(
+			os.Stderr,
 			"It shouldn't be like this. File \"%s\" exists but we can't stat it\n",
-			hdr.FileName))
+			hdr.FileName)
+		proto.SendError(conn, proto.ErrUnknown)
+		return
 	}
 
 	f, err := os.Create(hdr.FileName)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		log.Println(err)
 		proto.SendError(conn, proto.ErrUnknown)
 		return
 	}
@@ -155,6 +177,7 @@ func handleConn(conn net.Conn) {
 	buf := make([]byte, proto.ChunkSize)
 	var total int64 = 0
 
+	// TODO: calculate statistics and notify ui somewhere in loop
 	for {
 		if total >= hdr.FileSize {
 			break
@@ -168,7 +191,7 @@ func handleConn(conn net.Conn) {
 
 		if err != nil {
 			// TODO: notify UI about errors
-			fmt.Fprintf(os.Stderr, "Error while reading chunk from %s: %s\n",
+			log.Printf("Error while reading chunk from [%s]: %s\n",
 				conn.RemoteAddr(), err)
 			proto.SendError(conn, proto.ErrUnknown)
 			return
@@ -176,7 +199,7 @@ func handleConn(conn net.Conn) {
 
 		_, err = f.Write(buf[:n])
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			log.Println(err)
 			proto.SendError(conn, proto.ErrUnknown)
 			return
 		}
@@ -184,14 +207,13 @@ func handleConn(conn net.Conn) {
 
 	info, err := os.Stat(hdr.FileName)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		log.Println(err)
 		proto.SendError(conn, proto.ErrCorruptedFile)
 		return
 	}
 
 	if info.Size() != hdr.FileSize {
-		fmt.Fprintf(os.Stderr,
-			"Size of \"%s\" does not match with file size that client told us\n",
+		log.Printf("Size of \"%s\" does not match with file size that client told us\n",
 			hdr.FileName)
 		proto.SendError(conn, proto.ErrCorruptedFile)
 		return
@@ -200,7 +222,7 @@ func handleConn(conn net.Conn) {
 	// First, do fsync
 	err = f.Sync()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		log.Println(err)
 		proto.SendError(conn, proto.ErrUnknown)
 		return
 	}
@@ -263,7 +285,7 @@ func progress(done int64, total int64) string {
 	doneBars := int(float64(done) / float64(total) * uiTotalBars)
 
 	if !(doneBars >= 0 && doneBars <= uiTotalBars) {
-		fmt.Fprintf(os.Stderr, "doneBars=%d", doneBars)
+		log.Printf("doneBars=%d but total is %d\n", doneBars, uiTotalBars)
 	}
 
 	var sb strings.Builder

@@ -5,12 +5,21 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"uploader/proto"
 )
 
-const fileName = "testfile"
-
 func main() {
+
+	if len(os.Args) != 3 {
+		fmt.Fprintf(os.Stderr, "Usage\n\t%s <server ip:port> <file>\n", os.Args[0])
+		os.Exit(1)
+	}
+
+	conn_str := os.Args[1]
+	fileName := filepath.Base(os.Args[2])
+	// use this to check server file names security checks
+	// fileName := os.Args[2]
 
 	info, err := os.Stat(fileName)
 	if err != nil {
@@ -25,9 +34,9 @@ func main() {
 	}
 	defer f.Close()
 
-	conn, err := net.Dial("tcp4", "127.0.0.1:4444")
+	conn, err := net.Dial("tcp4", conn_str)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Cannot create connection: %s\n", err)
+		fmt.Fprintf(os.Stderr, "Cannot connect to the server: %s\n", err)
 		os.Exit(1)
 	}
 	defer conn.Close()
@@ -64,7 +73,7 @@ func main() {
 	fmt.Println("Waiting accept from server")
 	protoErr := proto.RecvError(conn)
 	if protoErr != proto.ErrDone {
-		fmt.Fprintf(os.Stderr, "Unexpected error: %s\n",
+		fmt.Fprintf(os.Stderr, "Got error from server: %s\n",
 			proto.Err2Str(protoErr))
 		os.Exit(1)
 	}
