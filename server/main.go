@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,9 +37,14 @@ type client struct {
 	dead    bool
 }
 
-type clientsMap struct {
+type clientMap struct {
 	mu      sync.Mutex
 	clients map[net.Addr]*client
+}
+
+type clientMapKV struct {
+	addr   net.Addr
+	client client
 }
 
 func main() {
@@ -74,7 +80,7 @@ func main() {
 	}
 	defer listener.Close()
 
-	s := clientsMap{clients: make(map[net.Addr]*client)}
+	s := clientMap{clients: make(map[net.Addr]*client)}
 
 	go ui(&s)
 
@@ -91,7 +97,7 @@ func main() {
 
 }
 
-func handleConn(conn net.Conn, cMap *clientsMap) {
+func handleConn(conn net.Conn, cMap *clientMap) {
 	defer conn.Close()
 
 	hdr, protoErr, errDesc := proto.ReadHeader(conn)
@@ -166,7 +172,7 @@ func handleConn(conn net.Conn, cMap *clientsMap) {
 	proto.SendError(conn, proto.ErrDone)
 }
 
-func receiveToFile(conn net.Conn, hdr proto.Header, f *os.File, cMap *clientsMap) error {
+func receiveToFile(conn net.Conn, hdr proto.Header, f *os.File, cMap *clientMap) error {
 
 	buf := make([]byte, proto.ChunkSize)
 	var sent int64 = 0
@@ -237,14 +243,31 @@ func isSafeFileName(name string) bool {
 	return true
 }
 
-func ui(s *clientsMap) {
+func ui(s *clientMap) {
 	ticker := time.NewTicker(uiUpdateTime)
 	for range ticker.C {
 		s.mu.Lock()
-		render(s.clients)
+		pairs := copyClientMap(s)
 		deleteCompletedOrDead(s.clients, uiCompleteConnectionTimeout)
 		s.mu.Unlock()
+
+		sort.Slice(
+			pairs,
+			func(i, j int) bool {
+				return pairs[i].addr.String() < pairs[j].addr.String()
+			})
+
+		render(pairs)
 	}
+}
+
+// Caller should acquire mutex !
+func copyClientMap(s *clientMap) []clientMapKV {
+	pairs := make([]clientMapKV, 0, len(s.clients))
+	for a, c := range s.clients {
+		pairs = append(pairs, clientMapKV{addr: a, client: *c})
+	}
+	return pairs
 }
 
 // Delete all clients that was completed "d" ago
@@ -305,12 +328,12 @@ func humanize(bytes float64) string {
 
 // caller must aquire mutex on statistics
 // TODO: sort output
-func render(clients map[net.Addr]*client) {
+func render(pairs []clientMapKV) {
 	fmt.Print("\033[2J\033[H") // clear screen
-	for addr, c := range clients {
-		m := c.metrics
-		i := c.info
-		fmt.Printf("[%s]", addr)
+	for _, pair := range pairs {
+		m := pair.client.metrics
+		i := pair.client.info
+		fmt.Printf("[%s]", pair.addr)
 		fmt.Printf("   avg %s/s", humanize(m.avgBps))
 		fmt.Printf("   ins %s/s", humanize(m.instantBps))
 		fmt.Printf("   %s", progress(m.sent, i.FileSize))
