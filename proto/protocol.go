@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"net"
 )
 
 type Header struct {
@@ -36,23 +37,23 @@ const (
 func Err2Str(e Error) string {
 	switch e {
 	case ErrDone:
-		return "ErrDone"
+		return "Done"
 	case ErrNameTooLong:
-		return "ErrNameTooLong"
+		return "NameTooLong"
 	case ErrUnacceptedFileName:
-		return "ErrUnacceptedFileName"
+		return "UnacceptedFileName"
 	case ErrNotEnoughSpace:
-		return "ErrNotEnoughSpace"
+		return "NotEnoughSpace"
 	case ErrUnknown:
-		return "ErrUnknown"
+		return "UnknownError"
 	case ErrBadMagick:
-		return "ErrBadMagick"
+		return "BadMagick"
 	case ErrExists:
-		return "ErrExists"
+		return "Exists"
 	case ErrCorruptedFile:
-		return "ErrCorruptedFile"
+		return "CorruptedFile"
 	default:
-		return "ErrUnknown"
+		return "TODO: NOT IMPLEMENTED ERROR"
 	}
 }
 
@@ -119,27 +120,45 @@ func WriteHeader(w io.Writer, h Header) error {
 }
 
 // see [io.Reader.Read]
-func Read(r io.Reader, buf []byte) (int, error) {
-	return r.Read(buf)
+func Read(c net.Conn, buf []byte) (int, error) {
+	return c.Read(buf)
 }
 
-func Write(w io.Writer, buf []byte) error {
-	_, err := w.Write(buf)
+func Write(c net.Conn, buf []byte) error {
+	_, err := c.Write(buf)
 	return err
 }
 
-func SendError(w io.Writer, e Error) error {
+func SendError(w io.Writer, e Error, description string) error {
 	var buf [1]byte
 	buf[0] = e
 	_, err := w.Write(buf[:])
+	if err != nil {
+		return err
+	}
+
+	_, err = w.Write([]byte(description))
 	return err
 }
 
-func RecvError(r io.Reader) Error {
+func RecvError(r io.Reader) (e Error, description string) {
 	buf := make([]byte, 1)
 	_, err := r.Read(buf)
 	if err != nil {
-		return ErrUnknown
+		if err == io.EOF {
+			return ErrUnknown, "Connection was closed by server"
+		}
+		return ErrUnknown, err.Error()
 	}
-	return buf[0]
+
+	buf_desc, err := io.ReadAll(r)
+
+	if err != nil {
+		if err == io.EOF {
+			return ErrUnknown, "Connection was closed by server"
+		}
+		return ErrUnknown, err.Error()
+	}
+
+	return buf[0], string(buf_desc)
 }

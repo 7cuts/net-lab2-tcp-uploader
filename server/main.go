@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,26 +13,39 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"uploader/proto"
 )
 
 const clientsChanSize = 64
 const (
-	uiUpdateTime                = 3 * time.Second
-	uiCompleteConnectionTimeout = 5 * time.Second
-	uiTotalBars                 = 10
+	uiUpdateTime     = 1 * time.Second
+	uiWaitClientTime = 5 * time.Second
+	uiTotalBars      = 10
+)
+const (
+	Reset = "\033[0m"
+	// Foreground
+	Red    = "\033[31m"
+	Green  = "\033[32m"
+	Yellow = "\033[33m"
+	Cyan   = "\033[36m"
+	White  = "\033[37m"
+	// Styles
+	Bold = "\033[1m"
 )
 
 type clientMetrics struct {
 	instantBps float64
 	avgBps     float64
 	sent       int64
+	status     int
 	// for ui
 	lastUpdate time.Time
 }
 
-type client struct {
+type clientStruct struct {
 	metrics clientMetrics
 	info    proto.Header
 	dead    bool
@@ -39,12 +53,17 @@ type client struct {
 
 type clientMap struct {
 	mu      sync.Mutex
-	clients map[net.Addr]*client
+	clients map[net.Addr]*clientStruct
 }
 
 type clientMapKV struct {
 	addr   net.Addr
-	client client
+	client clientStruct
+}
+
+type statTimes struct {
+	prevTime  time.Time
+	startTime time.Time
 }
 
 func main() {
@@ -80,7 +99,7 @@ func main() {
 	}
 	defer listener.Close()
 
-	s := clientMap{clients: make(map[net.Addr]*client)}
+	s := clientMap{clients: make(map[net.Addr]*clientStruct)}
 
 	go ui(&s)
 
@@ -110,33 +129,39 @@ func handleConn(conn net.Conn, cMap *clientMap) {
 
 	if !isSafeFileName(hdr.FileName) {
 		log.Printf("Client [%s] sent not safe file name: \"%s\"\n", conn.RemoteAddr(), hdr.FileName)
-		proto.SendError(conn, proto.ErrUnacceptedFileName)
+		proto.SendError(conn, proto.ErrUnacceptedFileName, fmt.Sprintf("Unsafe file name: \"%s\"", hdr.FileName))
 		return
 	}
 
 	path := fmt.Sprintf("uploads/%s", hdr.FileName)
 
+	// check if we have enough space
+
 	// check if file exists
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 	if os.IsExist(err) {
-		proto.SendError(conn, proto.ErrExists)
-		log.Printf("Client [%s] tried to upload existing file: \"%s\"\n", conn.RemoteAddr(), path)
+		proto.SendError(conn, proto.ErrExists, fmt.Sprintf("File \"%s\" is already exists", hdr.FileName))
+		log.Printf("Client [%s] tried to upload existing file: \"%s\"\n", conn.RemoteAddr(), hdr.FileName)
 		return
 	}
 	if err != nil {
 		// it isn't ok if we cannot create file in uploads dir
-		proto.SendError(conn, proto.ErrUnknown)
-		log.Printf("Cannot create file: %s\n", err)
+		proto.SendError(conn, proto.ErrUnknown, "Сисадмин накосячил в директории сервера")
+		log.Printf("Client [%s]: %s\n", conn.RemoteAddr(), err)
 		return
 	}
 	defer f.Close()
 
 	err = receiveToFile(conn, *hdr, f, cMap)
 	if err != nil {
-		// TODO: more context
-		log.Printf("Client [%s]: Error %s while receiving file\n",
+		log.Printf("Client [%s]: ERROR: %s\n",
 			conn.RemoteAddr(), err)
-		proto.SendError(conn, proto.ErrUnknown)
+
+		if errors.Is(err, syscall.ENOSPC) {
+			proto.SendError(conn, proto.ErrNotEnoughSpace, err.Error())
+		} else {
+			proto.SendError(conn, proto.ErrUnknown, err.Error())
+		}
 
 		cMap.mu.Lock()
 		cMap.clients[conn.RemoteAddr()].dead = true
@@ -147,16 +172,22 @@ func handleConn(conn net.Conn, cMap *clientMap) {
 
 	info, err := f.Stat()
 	if err != nil {
-		log.Println("======================== start ===========================")
 		log.Println(err)
-		proto.SendError(conn, proto.ErrCorruptedFile)
+		proto.SendError(conn, proto.ErrCorruptedFile, "Cannot stat uploaded file on the server. File was not uploaded properly")
+		os.Remove(path)
 		return
 	}
 
 	if info.Size() != hdr.FileSize {
 		log.Printf("Size of \"%s\" does not match with file size that client told us\n",
 			hdr.FileName)
-		proto.SendError(conn, proto.ErrCorruptedFile)
+
+		msg := "File is bigger then promised in header"
+		if info.Size() < hdr.FileSize {
+			msg = "File is smaller then promised in header"
+		}
+		proto.SendError(conn, proto.ErrCorruptedFile, msg)
+		os.Remove(path)
 		return
 	}
 
@@ -164,32 +195,39 @@ func handleConn(conn net.Conn, cMap *clientMap) {
 	err = f.Sync()
 	if err != nil {
 		log.Println(err)
-		proto.SendError(conn, proto.ErrUnknown)
+		proto.SendError(conn, proto.ErrUnknown, "Cannot sync file to disk on server")
+		os.Remove(path)
 		return
 	}
 
 	// And only then tell client we've done
-	proto.SendError(conn, proto.ErrDone)
+	proto.SendError(conn, proto.ErrDone, "OK")
 }
 
 func receiveToFile(conn net.Conn, hdr proto.Header, f *os.File, cMap *clientMap) error {
 
 	buf := make([]byte, proto.ChunkSize)
-	var sent int64 = 0
+	var (
+		sent     int64 = 0
+		prevSent int64 = 0
+	)
 
-	prevTime := time.Now()
-	startTime := time.Now()
+	st := statTimes{
+		prevTime:  time.Now(), // for instant speed
+		startTime: time.Now(), // for avg speed
+	}
 
 	c := clientMetrics{
 		instantBps: 0,
 		avgBps:     0,
 		sent:       sent,
+		lastUpdate: time.Now(),
 	}
 
 	// add new connection to map
 	cMap.mu.Lock()
 	addr := conn.RemoteAddr()
-	cMap.clients[addr] = &client{metrics: c, info: hdr, dead: false}
+	cMap.clients[addr] = &clientStruct{metrics: c, info: hdr, dead: false}
 	cMap.mu.Unlock()
 
 	for {
@@ -197,37 +235,56 @@ func receiveToFile(conn net.Conn, hdr proto.Header, f *os.File, cMap *clientMap)
 			break
 		}
 
+		conn.SetReadDeadline(time.Now().Add(uiUpdateTime))
 		n, err := proto.Read(conn, buf)
+
 		sent += int64(n)
 		if err == io.EOF && sent >= hdr.FileSize {
 			break
-		}
-		if err != nil {
+		} else if errors.Is(err, os.ErrDeadlineExceeded) {
+			// client doesn't send file to us. but we
+			// should update statistics for the ui
+		} else if err != nil {
 			return err
 		}
 
-		// TODO: refactor statistcs to closure
-		curTime := time.Now()
-		dt := curTime.Sub(prevTime).Seconds()
-		totalTime := time.Since(startTime).Seconds()
-		prevTime = curTime
-
-		// update stats
-		cMap.mu.Lock()
-		cMap.clients[addr].metrics = clientMetrics{
-			instantBps: float64(n) / dt,
-			avgBps:     float64(sent) / totalTime,
-			sent:       sent,
-			lastUpdate: curTime,
+		// report statistics with some period
+		if time.Since(st.prevTime).Seconds() > uiUpdateTime.Seconds()/2 {
+			m := calcMetrics(&st, sent, sent-prevSent)
+			prevSent = sent
+			cMap.mu.Lock()
+			cMap.clients[addr].metrics = m
+			cMap.mu.Unlock()
 		}
-		cMap.mu.Unlock()
 
 		_, err = f.Write(buf[:n])
 		if err != nil {
 			return err
 		}
 	}
+
+	// tell about 100%
+	m := calcMetrics(&st, sent, sent-prevSent)
+	cMap.mu.Lock()
+	cMap.clients[addr].metrics = m
+	cMap.mu.Unlock()
+
 	return nil
+}
+
+func calcMetrics(st *statTimes, sent, deltaTotal int64) clientMetrics {
+	curTime := time.Now()
+	deltaTime := curTime.Sub(st.prevTime).Seconds()
+	totalTime := time.Since(st.startTime).Seconds()
+	st.prevTime = curTime
+
+	// update stats
+	return clientMetrics{
+		instantBps: float64(deltaTotal) / deltaTime,
+		avgBps:     float64(sent) / totalTime,
+		sent:       sent,
+		lastUpdate: curTime,
+	}
 }
 
 func isSafeFileName(name string) bool {
@@ -248,7 +305,7 @@ func ui(s *clientMap) {
 	for range ticker.C {
 		s.mu.Lock()
 		pairs := copyClientMap(s)
-		deleteCompletedOrDead(s.clients, uiCompleteConnectionTimeout)
+		deleteCompletedOrDead(s.clients, uiWaitClientTime)
 		s.mu.Unlock()
 
 		sort.Slice(
@@ -272,13 +329,13 @@ func copyClientMap(s *clientMap) []clientMapKV {
 
 // Delete all clients that was completed "d" ago
 // Caller must aquire mutex
-func deleteCompletedOrDead(clients map[net.Addr]*client, d time.Duration) (found bool) {
+func deleteCompletedOrDead(clients map[net.Addr]*clientStruct, d time.Duration) (found bool) {
 	found = false
 	for addr, c := range clients {
 		m := c.metrics
 		i := c.info
 		done := m.sent == i.FileSize
-		if done && time.Since(m.lastUpdate) > d || c.dead {
+		if (done || c.dead) && time.Since(m.lastUpdate) > d {
 			found = true
 			delete(clients, addr)
 		}
@@ -304,11 +361,19 @@ func progress(done int64, total int64) string {
 
 	var sb strings.Builder
 
+	if percent == 100 {
+		sb.WriteString(Green)
+	}
+
 	sb.WriteString("[")
 	sb.WriteString(strings.Repeat("=", doneBars))
 	sb.WriteString(strings.Repeat(" ", uiTotalBars-doneBars))
 	sb.WriteString("]")
 	fmt.Fprintf(&sb, " %d%%", percent)
+
+	if percent == 100 {
+		sb.WriteString(Reset)
+	}
 
 	return sb.String()
 }
@@ -329,17 +394,41 @@ func humanize(bytes float64) string {
 // caller must aquire mutex on statistics
 // TODO: sort output
 func render(pairs []clientMapKV) {
-	fmt.Print("\033[2J\033[H") // clear screen
+	fmt.Print("\033[2J\033[3J\033[H") // clear screen
 	for _, pair := range pairs {
 		m := pair.client.metrics
 		i := pair.client.info
 		fmt.Printf("[%s]", pair.addr)
 		fmt.Printf("   avg %s/s", humanize(m.avgBps))
-		fmt.Printf("   ins %s/s", humanize(m.instantBps))
+
+		if m.instantBps == 0 {
+			fmt.Printf("   %sins %s/s%s", Yellow, humanize(m.instantBps), Reset)
+		} else {
+			fmt.Printf("   ins %s/s", humanize(m.instantBps))
+		}
 		fmt.Printf("   %s", progress(m.sent, i.FileSize))
 		fmt.Printf("   %s", i.FileName)
 		fmt.Printf(" (%s/%s)", humanize(float64(m.sent)), humanize(float64(i.FileSize)))
+		fmt.Printf("  %s", colorizeStatus(&pair.client))
 		fmt.Printf("\n")
 	}
+}
 
+func colorizeStatus(client *clientStruct) string {
+
+	m := client.metrics
+	i := client.info
+
+	if i.FileSize == m.sent {
+		return Green + "[COMPLETED]" + Reset
+	}
+
+	if client.dead {
+		return Red + Bold + "[ERROR]" + Reset
+	}
+
+	if m.instantBps == 0 {
+		return Yellow + "[WAITING]" + Reset
+	}
+	return Cyan + "[IN PROGRESS]" + Reset
 }

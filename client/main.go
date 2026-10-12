@@ -11,6 +11,18 @@ import (
 	"uploader/proto"
 )
 
+const (
+	Reset = "\033[0m"
+	// Foreground
+	Red    = "\033[31m"
+	Green  = "\033[32m"
+	Yellow = "\033[33m"
+	Cyan   = "\033[36m"
+	White  = "\033[37m"
+	// Styles
+	Bold = "\033[1m"
+)
+
 func main() {
 
 	if len(os.Args) != 3 {
@@ -79,10 +91,10 @@ func main() {
 
 	// wait message from server
 	fmt.Println("Waiting server response...")
-	protoErr := proto.RecvError(conn)
+	protoErr, desc := proto.RecvError(conn)
 	if protoErr != proto.ErrDone {
-		fmt.Fprintf(os.Stderr, "[ERROR] %s\n",
-			proto.Err2Str(protoErr))
+		fmt.Fprintf(os.Stderr, "%sFAILED %s (%s)%s\n",
+			Red, desc, proto.Err2Str(protoErr), Reset)
 		os.Exit(1)
 	}
 

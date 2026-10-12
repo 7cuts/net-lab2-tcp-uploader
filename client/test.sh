@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 
-NUM_TESTS=5
-SIZE=2G
+NUM_TESTS=10
+SIZE=1G
 FILENAME=file
 IP=127.0.0.1
 PORT=4444
