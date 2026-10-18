@@ -16,9 +16,11 @@ import (
 	"syscall"
 	"time"
 	"uploader/proto"
+
+	"golang.org/x/net/netutil"
 )
 
-const clientsChanSize = 64
+const maxClients = 100
 const (
 	uiUpdateTime     = 1 * time.Second
 	uiWaitClientTime = 5 * time.Second
@@ -99,13 +101,15 @@ func main() {
 	}
 	defer listener.Close()
 
+	limitListener := netutil.LimitListener(listener, maxClients)
+
 	s := clientMap{clients: make(map[net.Addr]*clientStruct)}
 
 	go ui(&s)
 
 	// server loop
 	for {
-		client, err := listener.Accept()
+		client, err := limitListener.Accept()
 		if err != nil {
 			log.Printf("Error while accepting client %s\n", err)
 			continue
@@ -392,7 +396,6 @@ func humanize(bytes float64) string {
 }
 
 // caller must aquire mutex on statistics
-// TODO: sort output
 func render(pairs []clientMapKV) {
 	fmt.Print("\033[2J\033[3J\033[H") // clear screen
 	for _, pair := range pairs {

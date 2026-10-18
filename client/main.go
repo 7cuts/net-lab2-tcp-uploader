@@ -93,8 +93,8 @@ func main() {
 	fmt.Println("Waiting server response...")
 	protoErr, desc := proto.RecvError(conn)
 	if protoErr != proto.ErrDone {
-		fmt.Fprintf(os.Stderr, "%sFAILED %s (%s)%s\n",
-			Red, desc, proto.Err2Str(protoErr), Reset)
+		fmt.Fprintf(os.Stderr, "%sFAILED %s %s\n",
+			Red, desc, Reset)
 		os.Exit(1)
 	}
 
