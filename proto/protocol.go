@@ -9,7 +9,7 @@ import (
 
 type Header struct {
 	FileName string
-	FileSize int64
+	FileSize int64 // use int64 because FileStat uses int64 as file size
 }
 
 type Error = byte

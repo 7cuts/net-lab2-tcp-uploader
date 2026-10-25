@@ -1,4 +1,5 @@
 #!/usr/bin/bash
+cd ../
 
 NUM_TESTS=10
 SIZE=1G
